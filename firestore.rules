@@ -1,0 +1,279 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    function isStringBounded(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    // --- Validation Blueprints ---
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'cityLabel', 'ranchLabel', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'email', 'cityLabel', 'ranchLabel', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isStringBounded(data.displayName, 1, 100)
+        && isStringBounded(data.email, 0, 200)
+        && isStringBounded(data.cityLabel, 1, 50)
+        && isStringBounded(data.ranchLabel, 1, 50)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGarment(data, userId) {
+      return data.keys().hasAll([
+        'ownerId', 'name', 'category', 'color', 'location',
+        'targetLocation', 'laundryStatus', 'isEssential', 'notes',
+        'quantity', 'tripId', 'createdAt', 'updatedAt'
+      ])
+        && data.keys().hasOnly([
+          'ownerId', 'name', 'category', 'color', 'location',
+          'targetLocation', 'laundryStatus', 'isEssential', 'notes',
+          'quantity', 'tripId', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isStringBounded(data.name, 1, 80)
+        && data.category in ['playeras', 'pantalones', 'chamarras', 'calzado', 'formal', 'interior', 'accesorios', 'otros']
+        && isStringBounded(data.color, 0, 30)
+        && data.location in ['ciudad', 'rancho', 'maleta']
+        && data.targetLocation in ['ciudad', 'rancho', 'ninguno']
+        && data.laundryStatus in ['limpia', 'por_lavar']
+        && data.isEssential is bool
+        && isStringBounded(data.notes, 0, 240)
+        && data.quantity is int && data.quantity >= 1 && data.quantity <= 99
+        && isStringBounded(data.tripId, 0, 128)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidIdArray(arr) {
+      return arr is list
+        && arr.size() <= 100
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() > 0 && arr[0].size() <= 128));
+    }
+
+    function isValidTrip(data, userId) {
+      return data.keys().hasAll([
+        'ownerId', 'title', 'origin', 'destination', 'status',
+        'travelDate', 'itemIds', 'packedIds', 'notes', 'createdAt', 'updatedAt'
+      ])
+        && data.keys().hasOnly([
+          'ownerId', 'title', 'origin', 'destination', 'status',
+          'travelDate', 'itemIds', 'packedIds', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isStringBounded(data.title, 1, 100)
+        && data.origin in ['ciudad', 'rancho']
+        && data.destination in ['ciudad', 'rancho']
+        && data.origin != data.destination
+        && data.status in ['planeando', 'en_camino', 'completado']
+        && isStringBounded(data.travelDate, 0, 30)
+        && isValidIdArray(data.itemIds)
+        && isValidIdArray(data.packedIds)
+        && isStringBounded(data.notes, 0, 240)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMovement(data, userId) {
+      return data.keys().hasAll([
+        'ownerId', 'garmentId', 'garmentName', 'fromLocation',
+        'toLocation', 'tripTitle', 'createdAt'
+      ])
+        && data.keys().hasOnly([
+          'ownerId', 'garmentId', 'garmentName', 'fromLocation',
+          'toLocation', 'tripTitle', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.garmentId)
+        && isStringBounded(data.garmentName, 1, 80)
+        && data.fromLocation in ['ciudad', 'rancho', 'maleta']
+        && data.toLocation in ['ciudad', 'rancho', 'maleta']
+        && isStringBounded(data.tripTitle, 0, 100)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidBoundedStringArray(arr, maxItems, maxItemLen) {
+      return arr is list
+        && arr.size() <= maxItems
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() > 0 && arr[0].size() <= maxItemLen));
+    }
+
+    function isValidSeasonReport(data, userId) {
+      return data.keys().hasAll([
+        'ownerId', 'title', 'monthKey', 'monthLabel',
+        'toCityCount', 'toRanchCount', 'totalMovements', 'completedTripsCount',
+        'citySnapshotCount', 'ranchSnapshotCount', 'bagSnapshotCount',
+        'topMovedNames', 'movedSummaryLines', 'notes', 'createdAt'
+      ])
+        && data.keys().hasOnly([
+          'ownerId', 'title', 'monthKey', 'monthLabel',
+          'toCityCount', 'toRanchCount', 'totalMovements', 'completedTripsCount',
+          'citySnapshotCount', 'ranchSnapshotCount', 'bagSnapshotCount',
+          'topMovedNames', 'movedSummaryLines', 'notes', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isStringBounded(data.title, 1, 100)
+        && data.monthKey is string && data.monthKey.size() == 7 && data.monthKey.matches('^\\d{4}-\\d{2}$')
+        && isStringBounded(data.monthLabel, 1, 40)
+        && data.toCityCount is int && data.toCityCount >= 0 && data.toCityCount <= 10000
+        && data.toRanchCount is int && data.toRanchCount >= 0 && data.toRanchCount <= 10000
+        && data.totalMovements is int && data.totalMovements >= 0 && data.totalMovements <= 10000
+        && data.completedTripsCount is int && data.completedTripsCount >= 0 && data.completedTripsCount <= 1000
+        && data.citySnapshotCount is int && data.citySnapshotCount >= 0 && data.citySnapshotCount <= 10000
+        && data.ranchSnapshotCount is int && data.ranchSnapshotCount >= 0 && data.ranchSnapshotCount <= 10000
+        && data.bagSnapshotCount is int && data.bagSnapshotCount >= 0 && data.bagSnapshotCount <= 10000
+        && isValidBoundedStringArray(data.topMovedNames, 10, 100)
+        && isValidBoundedStringArray(data.movedSummaryLines, 50, 160)
+        && isStringBounded(data.notes, 0, 240)
+        && data.createdAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'cityLabel', 'ranchLabel', 'updatedAt']);
+      allow delete: if false;
+
+      match /garments/{garmentId} {
+        allow get: if isOwner(userId) && isValidId(garmentId);
+        allow list: if isSignedIn() && userId == request.auth.uid && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(garmentId)
+          && userId == request.auth.uid
+          && isValidGarment(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(garmentId)
+          && userId == request.auth.uid
+          && isValidGarment(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['location', 'targetLocation', 'tripId', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['laundryStatus', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'category', 'color', 'location', 'targetLocation',
+              'laundryStatus', 'isEssential', 'notes', 'quantity', 'tripId', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedUser() && isValidId(userId) && isValidId(garmentId) && userId == request.auth.uid;
+      }
+
+      match /trips/{tripId} {
+        allow get: if isOwner(userId) && isValidId(tripId);
+        allow list: if isSignedIn() && userId == request.auth.uid && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(tripId)
+          && userId == request.auth.uid
+          && isValidTrip(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(tripId)
+          && userId == request.auth.uid
+          && existing().status != 'completado'
+          && isValidTrip(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['itemIds', 'packedIds', 'status', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'origin', 'destination', 'travelDate', 'notes',
+              'status', 'itemIds', 'packedIds', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedUser() && isValidId(userId) && isValidId(tripId) && userId == request.auth.uid;
+      }
+
+      match /movements/{movementId} {
+        allow get: if isOwner(userId) && isValidId(movementId);
+        allow list: if isSignedIn() && userId == request.auth.uid && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(movementId)
+          && userId == request.auth.uid
+          && isValidMovement(incoming(), userId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if false;
+        allow delete: if isVerifiedUser() && isValidId(userId) && isValidId(movementId) && userId == request.auth.uid;
+      }
+
+      match /seasons/{seasonId} {
+        allow get: if isOwner(userId) && isValidId(seasonId);
+        allow list: if isSignedIn() && userId == request.auth.uid && resource.data.ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(seasonId)
+          && userId == request.auth.uid
+          && isValidSeasonReport(incoming(), userId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if false;
+        allow delete: if isVerifiedUser() && isValidId(userId) && isValidId(seasonId) && userId == request.auth.uid;
+      }
+    }
+  }
+}

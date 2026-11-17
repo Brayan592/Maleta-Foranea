@@ -1,0 +1,6 @@
+{
+  "name": "Maleta Foránea",
+  "description": "Control personal de ropa y maletas entre la Ciudad y tu Rancho para estudiantes y foráneos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

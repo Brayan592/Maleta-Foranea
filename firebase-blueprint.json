@@ -1,0 +1,393 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Perfil privado del usuario foráneo con sus etiquetas personalizadas para Ciudad y Rancho.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "cityLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "ranchLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 50
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "email",
+        "cityLabel",
+        "ranchLabel",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Garment": {
+      "title": "Garment",
+      "description": "Prenda o artículo del guardarropa rastreado entre La Ciudad, El Rancho y la Maleta.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "playeras",
+            "pantalones",
+            "chamarras",
+            "calzado",
+            "formal",
+            "interior",
+            "accesorios",
+            "otros"
+          ]
+        },
+        "color": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "location": {
+          "type": "string",
+          "enum": [
+            "ciudad",
+            "rancho",
+            "maleta"
+          ]
+        },
+        "targetLocation": {
+          "type": "string",
+          "enum": [
+            "ciudad",
+            "rancho",
+            "ninguno"
+          ]
+        },
+        "laundryStatus": {
+          "type": "string",
+          "enum": [
+            "limpia",
+            "por_lavar"
+          ]
+        },
+        "isEssential": {
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "quantity": {
+          "type": "integer"
+        },
+        "tripId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "name",
+        "category",
+        "color",
+        "location",
+        "targetLocation",
+        "laundryStatus",
+        "isEssential",
+        "notes",
+        "quantity",
+        "tripId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Trip": {
+      "title": "Trip",
+      "description": "Viaje o lista de maleta para trasladar prendas entre La Ciudad y El Rancho.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "origin": {
+          "type": "string",
+          "enum": [
+            "ciudad",
+            "rancho"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "enum": [
+            "ciudad",
+            "rancho"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "planeando",
+            "en_camino",
+            "completado"
+          ]
+        },
+        "travelDate": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "itemIds": {
+          "type": "array"
+        },
+        "packedIds": {
+          "type": "array"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "title",
+        "origin",
+        "destination",
+        "status",
+        "travelDate",
+        "itemIds",
+        "packedIds",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Movement": {
+      "title": "Movement",
+      "description": "Registro histórico inmutable de cada traslado de prenda entre ubicaciones.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "garmentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "garmentName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "fromLocation": {
+          "type": "string",
+          "enum": [
+            "ciudad",
+            "rancho",
+            "maleta"
+          ]
+        },
+        "toLocation": {
+          "type": "string",
+          "enum": [
+            "ciudad",
+            "rancho",
+            "maleta"
+          ]
+        },
+        "tripTitle": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "garmentId",
+        "garmentName",
+        "fromLocation",
+        "toLocation",
+        "tripTitle",
+        "createdAt"
+      ]
+    },
+    "SeasonReport": {
+      "title": "SeasonReport",
+      "description": "Resumen mensual guardado como vista exportable de Temporada entre la Ciudad y el Rancho.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "monthKey": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^\\d{4}-\\d{2}$"
+        },
+        "monthLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "toCityCount": {
+          "type": "integer"
+        },
+        "toRanchCount": {
+          "type": "integer"
+        },
+        "totalMovements": {
+          "type": "integer"
+        },
+        "completedTripsCount": {
+          "type": "integer"
+        },
+        "citySnapshotCount": {
+          "type": "integer"
+        },
+        "ranchSnapshotCount": {
+          "type": "integer"
+        },
+        "bagSnapshotCount": {
+          "type": "integer"
+        },
+        "topMovedNames": {
+          "type": "array"
+        },
+        "movedSummaryLines": {
+          "type": "array"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "title",
+        "monthKey",
+        "monthLabel",
+        "toCityCount",
+        "toRanchCount",
+        "totalMovements",
+        "completedTripsCount",
+        "citySnapshotCount",
+        "ranchSnapshotCount",
+        "bagSnapshotCount",
+        "topMovedNames",
+        "movedSummaryLines",
+        "notes",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Perfil privado del usuario dueño de su guardarropa."
+    },
+    "/users/{userId}/garments/{garmentId}": {
+      "schema": {
+        "$ref": "#/entities/Garment"
+      },
+      "description": "Prendas de ropa del usuario."
+    },
+    "/users/{userId}/trips/{tripId}": {
+      "schema": {
+        "$ref": "#/entities/Trip"
+      },
+      "description": "Viajes y maletas armadas por el usuario."
+    },
+    "/users/{userId}/movements/{movementId}": {
+      "schema": {
+        "$ref": "#/entities/Movement"
+      },
+      "description": "Historial de traslados de prendas."
+    },
+    "/users/{userId}/seasons/{seasonId}": {
+      "schema": {
+        "$ref": "#/entities/SeasonReport"
+      },
+      "description": "Reportes mensuales de Temporada guardados por el usuario."
+    }
+  }
+}
