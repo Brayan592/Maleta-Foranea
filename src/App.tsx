@@ -79,6 +79,7 @@ function WardrobeApp() {
     () => new Set()
   );
   const [hasPendingSync, setHasPendingSync] = useState(false);
+  const [fatalError, setFatalError] = useState<Error | null>(null);
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [garments, setGarments] = useState<Garment[]>([]);
@@ -233,6 +234,29 @@ function WardrobeApp() {
       });
     };
 
+    const reportSnapshotError = (
+      error: unknown,
+      op: OperationType,
+      path: string
+    ) => {
+      setDataLoading(false);
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code?: unknown }).code || '')
+          : '';
+      if (code === 'unavailable') {
+        console.warn(`Firestore sin conexión en ${path}; usando caché local.`);
+        return;
+      }
+      try {
+        handleFirestoreError(error, op, path);
+      } catch (wrapped) {
+        setFatalError(
+          wrapped instanceof Error ? wrapped : new Error(String(wrapped))
+        );
+      }
+    };
+
     const userPath = `users/${uid}`;
     const unsubProfile = onSnapshot(
       doc(db, 'users', uid),
@@ -248,7 +272,7 @@ function WardrobeApp() {
         syncPendingFlag();
       },
       (error) => {
-        handleFirestoreError(error, OperationType.GET, userPath);
+        reportSnapshotError(error, OperationType.GET, userPath);
       }
     );
 
@@ -285,7 +309,7 @@ function WardrobeApp() {
         persistMirror();
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, garmentsPath);
+        reportSnapshotError(error, OperationType.LIST, garmentsPath);
       }
     );
 
@@ -313,7 +337,7 @@ function WardrobeApp() {
         persistMirror();
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, tripsPath);
+        reportSnapshotError(error, OperationType.LIST, tripsPath);
       }
     );
 
@@ -341,7 +365,7 @@ function WardrobeApp() {
         persistMirror();
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, movementsPath);
+        reportSnapshotError(error, OperationType.LIST, movementsPath);
       }
     );
 
@@ -369,7 +393,7 @@ function WardrobeApp() {
         persistMirror();
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, seasonsPath);
+        reportSnapshotError(error, OperationType.LIST, seasonsPath);
       }
     );
 
@@ -422,6 +446,10 @@ function WardrobeApp() {
       await addGarment(user.uid, values);
     }
   };
+
+  if (fatalError) {
+    throw fatalError;
+  }
 
   if (!authReady) {
     return (

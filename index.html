@@ -16,8 +16,43 @@
       rel="stylesheet"
     />
   </head>
-  <body class="text-slate-900 antialiased selection:bg-slate-900 selection:text-white">
-    <div id="root"></div>
+  <body class="text-slate-900 antialiased selection:bg-slate-900 selection:text-white" style="background-color:#eef4f8;margin:0;font-family:system-ui,-apple-system,sans-serif;">
+    <div id="root">
+      <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;">
+        <div style="background:rgba(255,255,255,0.75);border:1px solid rgba(255,255,255,0.9);border-radius:16px;padding:18px 24px;box-shadow:0 10px 30px -12px rgba(15,23,42,0.08);color:#334155;font-size:14px;font-weight:500;">
+          Abriendo Maleta Foránea...
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        function showBootError(reason) {
+          if (window.__MALETA_APP_MOUNTED__) return;
+          var root = document.getElementById('root');
+          if (!root) return;
+          var msg = typeof reason === 'string' ? reason : (reason && reason.message) ? reason.message : 'Error al iniciar la aplicación';
+          root.innerHTML =
+            '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;">' +
+              '<div style="max-width:440px;width:100%;background:rgba(255,255,255,0.88);border:1px solid #e2e8f0;border-radius:18px;padding:24px;box-shadow:0 12px 32px -12px rgba(15,23,42,0.12);color:#0f172a;">' +
+                '<h1 style="margin:0 0 8px 0;font-size:18px;font-weight:700;">No se pudo abrir la app</h1>' +
+                '<p style="margin:0 0 14px 0;font-size:14px;line-height:1.5;color:#475569;">Ocurrió un problema al cargar la vista inicial. Intenta recargar la página.</p>' +
+                '<p style="margin:0 0 16px 0;padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;font-size:12px;color:#334155;word-break:break-word;"></p>' +
+                '<button type="button" onclick="window.location.reload()" style="background:#0f172a;color:#fff;border:none;border-radius:12px;padding:10px 16px;font-size:14px;font-weight:600;cursor:pointer;">Recargar aplicación</button>' +
+              '</div>' +
+            '</div>';
+          var detailEl = root.querySelectorAll('p')[1];
+          if (detailEl) detailEl.textContent = msg;
+        }
+        window.addEventListener('error', function (e) {
+          showBootError(e.error || e.message);
+        });
+        window.addEventListener('unhandledrejection', function (e) {
+          if (!window.__MALETA_APP_MOUNTED__) {
+            showBootError(e.reason);
+          }
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
