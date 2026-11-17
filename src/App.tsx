@@ -139,60 +139,85 @@ function WardrobeApp() {
   }, []);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (nextUser) => {
-      setUser(nextUser);
+    const authTimeout = window.setTimeout(() => {
       setAuthReady(true);
-      if (nextUser) {
-        // Hydrate instantaneously from custom IndexedDB mirror before network/Firestore warms up
-        const cached = await loadOfflineSnapshot(nextUser.uid);
-        if (cached) {
-          setProfile(cached.profile);
-          setGarments(cached.garments);
-          setTrips(cached.trips);
-          setMovements(cached.movements);
-          setSeasons(cached.seasons);
-          setLastBackupIso(cached.savedAtIso);
+    }, 4000);
+
+    const unsub = onAuthStateChanged(
+      auth,
+      async (nextUser) => {
+        window.clearTimeout(authTimeout);
+        setUser(nextUser);
+        setAuthReady(true);
+        if (nextUser) {
+          // Hydrate instantaneously from custom IndexedDB mirror before network/Firestore warms up
+          try {
+            const cached = await loadOfflineSnapshot(nextUser.uid);
+            if (cached) {
+              const safeGarments = Array.isArray(cached.garments) ? cached.garments : [];
+              const safeTrips = Array.isArray(cached.trips) ? cached.trips : [];
+              const safeMovements = Array.isArray(cached.movements) ? cached.movements : [];
+              const safeSeasons = Array.isArray(cached.seasons) ? cached.seasons : [];
+
+              setProfile(cached.profile ?? null);
+              setGarments(safeGarments);
+              setTrips(safeTrips);
+              setMovements(safeMovements);
+              setSeasons(safeSeasons);
+              setLastBackupIso(cached.savedAtIso ?? null);
+              snapshotRef.current = {
+                profile: cached.profile ?? null,
+                garments: safeGarments,
+                trips: safeTrips,
+                movements: safeMovements,
+                seasons: safeSeasons,
+              };
+              setDataLoading(false);
+            }
+          } catch (err) {
+            console.warn('No se pudo hidratar desde IndexedDB:', err);
+          }
+
+          try {
+            await ensureUserProfile(nextUser);
+          } catch (err) {
+            console.error('Error ensuring user profile:', err);
+          }
+        } else {
+          setProfile(null);
+          setGarments([]);
+          setTrips([]);
+          setMovements([]);
+          setSeasons([]);
           snapshotRef.current = {
-            profile: cached.profile,
-            garments: cached.garments,
-            trips: cached.trips,
-            movements: cached.movements,
-            seasons: cached.seasons,
+            profile: null,
+            garments: [],
+            trips: [],
+            movements: [],
+            seasons: [],
           };
+          pendingSourcesRef.current = {
+            profile: false,
+            garments: false,
+            trips: false,
+            movements: false,
+            seasons: false,
+          };
+          setPendingGarmentIds(new Set());
+          setHasPendingSync(false);
           setDataLoading(false);
         }
-
-        try {
-          await ensureUserProfile(nextUser);
-        } catch (err) {
-          console.error('Error ensuring user profile:', err);
-        }
-      } else {
-        setProfile(null);
-        setGarments([]);
-        setTrips([]);
-        setMovements([]);
-        setSeasons([]);
-        snapshotRef.current = {
-          profile: null,
-          garments: [],
-          trips: [],
-          movements: [],
-          seasons: [],
-        };
-        pendingSourcesRef.current = {
-          profile: false,
-          garments: false,
-          trips: false,
-          movements: false,
-          seasons: false,
-        };
-        setPendingGarmentIds(new Set());
-        setHasPendingSync(false);
-        setDataLoading(false);
+      },
+      (err) => {
+        window.clearTimeout(authTimeout);
+        console.error('Auth state listener error:', err);
+        setAuthReady(true);
       }
-    });
-    return () => unsub();
+    );
+    return () => {
+      window.clearTimeout(authTimeout);
+      unsub();
+    };
   }, []);
 
   useEffect(() => {

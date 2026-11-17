@@ -1,4 +1,4 @@
-import { initializeApp } from 'firebase/app';
+import { getApp, getApps, initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import {
   CACHE_SIZE_UNLIMITED,
@@ -8,27 +8,66 @@ import {
   initializeFirestore,
   persistentLocalCache,
   persistentMultipleTabManager,
+  persistentSingleTabManager,
   type Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
-const app = initializeApp(firebaseConfig);
+function canUseLocalStorage(): boolean {
+  try {
+    if (typeof window === 'undefined' || !('localStorage' in window)) {
+      return false;
+    }
+    const probeKey = '__maleta_foranea_ls_test__';
+    window.localStorage.setItem(probeKey, '1');
+    window.localStorage.removeItem(probeKey);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function canUseIndexedDb(): boolean {
+  try {
+    return typeof window !== 'undefined' && typeof window.indexedDB !== 'undefined';
+  } catch {
+    return false;
+  }
+}
+
+const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
 let firestoreInstance: Firestore;
 let indexedDbPersistenceActive = false;
 
 try {
-  firestoreInstance = initializeFirestore(
-    app,
-    {
-      localCache: persistentLocalCache({
-        tabManager: persistentMultipleTabManager(),
-        cacheSizeBytes: CACHE_SIZE_UNLIMITED,
-      }),
-    },
-    firebaseConfig.firestoreDatabaseId
-  );
-  indexedDbPersistenceActive = true;
+  if (canUseIndexedDb() && canUseLocalStorage()) {
+    firestoreInstance = initializeFirestore(
+      app,
+      {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+          cacheSizeBytes: CACHE_SIZE_UNLIMITED,
+        }),
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+    indexedDbPersistenceActive = true;
+  } else if (canUseIndexedDb()) {
+    firestoreInstance = initializeFirestore(
+      app,
+      {
+        localCache: persistentLocalCache({
+          tabManager: persistentSingleTabManager({ forceOwnership: false }),
+          cacheSizeBytes: CACHE_SIZE_UNLIMITED,
+        }),
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
+    indexedDbPersistenceActive = true;
+  } else {
+    firestoreInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
 } catch (error) {
   console.warn(
     'Falling back to default Firestore cache (IndexedDB unavailable or already initialized):',
