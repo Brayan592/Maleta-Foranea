@@ -1,40 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  onAuthStateChanged,
-  signInWithPopup,
-  signOut,
-  type User,
-} from 'firebase/auth';
-import {
-  collection,
-  doc,
-  onSnapshot,
-  query,
-  where,
-} from 'firebase/firestore';
-import { CloudOff, RefreshCw } from 'lucide-react';
-import {
-  auth,
-  db,
-  googleProvider,
-  handleFirestoreError,
-  isIndexedDbPersistenceActive,
-  OperationType,
-} from './firebase';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { TopBar, type AppTab } from './components/TopBar';
-import { WelcomeLanding } from './components/WelcomeLanding';
 import { InventoryView } from './components/InventoryView';
 import { TripsView } from './components/TripsView';
 import { StatsView } from './components/StatsView';
 import { EssentialsAndLaundryView } from './components/EssentialsAndLaundryView';
 import { HistoryView, type HistorySubTab } from './components/HistoryView';
 import { GarmentModal } from './components/GarmentModal';
-import { timestampToMillis } from './components/LocationHelpers';
 import {
-  loadOfflineSnapshot,
-  saveOfflineSnapshot,
-} from './services/offlineCache';
+  createEmptyWardrobeState,
+  loadLocalDatabase,
+  parseImportedBackup,
+  saveLocalDatabase,
+  type LocalStorageEngine,
+  type LocalWardrobeState,
+} from './services/localDatabase';
 import {
   addGarment,
   addGarmentToTrip,
@@ -44,12 +24,10 @@ import {
   deleteMovement,
   deleteSeasonReport,
   deleteTrip,
-  ensureUserProfile,
   moveGarmentDirect,
   removeGarmentFromTrip,
   saveSeasonReport,
   seedStarterWardrobe,
-  syncPendingWrites,
   toggleLaundryStatus,
   toggleTripPackedItem,
   updateGarment,
@@ -58,34 +36,15 @@ import {
 import type {
   Garment,
   GarmentFormValues,
-  Movement,
-  SeasonReport,
-  Trip,
   TripEndpoint,
-  UserProfile,
 } from './types';
 
 function WardrobeApp() {
-  const [user, setUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(false);
-  const [isSigningIn, setIsSigningIn] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
-
-  const [isOnline, setIsOnline] = useState(
-    typeof navigator !== 'undefined' ? navigator.onLine : true
+  const [wardrobeState, setWardrobeState] = useState<LocalWardrobeState>(() =>
+    createEmptyWardrobeState()
   );
-  const [lastBackupIso, setLastBackupIso] = useState<string | null>(null);
-  const [pendingGarmentIds, setPendingGarmentIds] = useState<Set<string>>(
-    () => new Set()
-  );
-  const [hasPendingSync, setHasPendingSync] = useState(false);
-  const [fatalError, setFatalError] = useState<Error | null>(null);
-
-  const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [garments, setGarments] = useState<Garment[]>([]);
-  const [trips, setTrips] = useState<Trip[]>([]);
-  const [movements, setMovements] = useState<Movement[]>([]);
-  const [seasons, setSeasons] = useState<SeasonReport[]>([]);
+  const [storageEngine, setStorageEngine] =
+    useState<LocalStorageEngine>('indexeddb');
   const [dataLoading, setDataLoading] = useState(true);
 
   const [activeTab, setActiveTab] = useState<AppTab>('inventario');
@@ -98,538 +57,244 @@ function WardrobeApp() {
     origin: TripEndpoint;
   } | null>(null);
 
-  // Track latest snapshot state for clean IndexedDB mirror persistence
-  const snapshotRef = useRef<{
-    profile: UserProfile | null;
-    garments: Garment[];
-    trips: Trip[];
-    movements: Movement[];
-    seasons: SeasonReport[];
-  }>({
-    profile: null,
-    garments: [],
-    trips: [],
-    movements: [],
-    seasons: [],
-  });
+  const stateRef = useRef<LocalWardrobeState>(wardrobeState);
+  stateRef.current = wardrobeState;
 
-  const pendingSourcesRef = useRef({
-    profile: false,
-    garments: false,
-    trips: false,
-    movements: false,
-    seasons: false,
-  });
-
-  const syncPendingFlag = () => {
-    const p = pendingSourcesRef.current;
-    setHasPendingSync(
-      p.profile || p.garments || p.trips || p.movements || p.seasons
-    );
-  };
+  const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
-
-  useEffect(() => {
-    const authTimeout = window.setTimeout(() => {
-      setAuthReady(true);
-    }, 4000);
-
-    const unsub = onAuthStateChanged(
-      auth,
-      async (nextUser) => {
-        window.clearTimeout(authTimeout);
-        setUser(nextUser);
-        setAuthReady(true);
-        if (nextUser) {
-          // Hydrate instantaneously from custom IndexedDB mirror before network/Firestore warms up
-          try {
-            const cached = await loadOfflineSnapshot(nextUser.uid);
-            if (cached) {
-              const safeGarments = Array.isArray(cached.garments) ? cached.garments : [];
-              const safeTrips = Array.isArray(cached.trips) ? cached.trips : [];
-              const safeMovements = Array.isArray(cached.movements) ? cached.movements : [];
-              const safeSeasons = Array.isArray(cached.seasons) ? cached.seasons : [];
-
-              setProfile(cached.profile ?? null);
-              setGarments(safeGarments);
-              setTrips(safeTrips);
-              setMovements(safeMovements);
-              setSeasons(safeSeasons);
-              setLastBackupIso(cached.savedAtIso ?? null);
-              snapshotRef.current = {
-                profile: cached.profile ?? null,
-                garments: safeGarments,
-                trips: safeTrips,
-                movements: safeMovements,
-                seasons: safeSeasons,
-              };
-              setDataLoading(false);
-            }
-          } catch (err) {
-            console.warn('No se pudo hidratar desde IndexedDB:', err);
-          }
-
-          try {
-            await ensureUserProfile(nextUser);
-          } catch (err) {
-            console.error('Error ensuring user profile:', err);
-          }
-        } else {
-          setProfile(null);
-          setGarments([]);
-          setTrips([]);
-          setMovements([]);
-          setSeasons([]);
-          snapshotRef.current = {
-            profile: null,
-            garments: [],
-            trips: [],
-            movements: [],
-            seasons: [],
-          };
-          pendingSourcesRef.current = {
-            profile: false,
-            garments: false,
-            trips: false,
-            movements: false,
-            seasons: false,
-          };
-          setPendingGarmentIds(new Set());
-          setHasPendingSync(false);
-          setDataLoading(false);
-        }
-      },
-      (err) => {
-        window.clearTimeout(authTimeout);
-        console.error('Auth state listener error:', err);
-        setAuthReady(true);
-      }
-    );
-    return () => {
-      window.clearTimeout(authTimeout);
-      unsub();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!authReady || !user) return;
-
-    const uid = user.uid;
-    const persistMirror = () => {
-      const nowIso = new Date().toISOString();
-      setLastBackupIso(nowIso);
-      void saveOfflineSnapshot({
-        userId: uid,
-        ...snapshotRef.current,
-      });
-    };
-
-    const reportSnapshotError = (
-      error: unknown,
-      op: OperationType,
-      path: string
-    ) => {
-      setDataLoading(false);
-      const code =
-        typeof error === 'object' && error !== null && 'code' in error
-          ? String((error as { code?: unknown }).code || '')
-          : '';
-      if (code === 'unavailable') {
-        console.warn(`Firestore sin conexión en ${path}; usando caché local.`);
-        return;
-      }
-      try {
-        handleFirestoreError(error, op, path);
-      } catch (wrapped) {
-        setFatalError(
-          wrapped instanceof Error ? wrapped : new Error(String(wrapped))
-        );
-      }
-    };
-
-    const userPath = `users/${uid}`;
-    const unsubProfile = onSnapshot(
-      doc(db, 'users', uid),
-      { includeMetadataChanges: true },
-      (snap) => {
-        if (snap.exists()) {
-          const nextProfile = snap.data() as UserProfile;
-          setProfile(nextProfile);
-          snapshotRef.current.profile = nextProfile;
-          persistMirror();
-        }
-        pendingSourcesRef.current.profile = snap.metadata.hasPendingWrites;
-        syncPendingFlag();
-      },
-      (error) => {
-        reportSnapshotError(error, OperationType.GET, userPath);
-      }
-    );
-
-    const garmentsPath = `users/${uid}/garments`;
-    const garmentsQuery = query(
-      collection(db, 'users', uid, 'garments'),
-      where('ownerId', '==', uid)
-    );
-    const unsubGarments = onSnapshot(
-      garmentsQuery,
-      { includeMetadataChanges: true },
-      (snap) => {
-        const nextPending = new Set<string>();
-        const list: Garment[] = snap.docs.map((d) => {
-          if (d.metadata.hasPendingWrites) {
-            nextPending.add(d.id);
-          }
-          return {
-            id: d.id,
-            ...(d.data() as Omit<Garment, 'id'>),
-          };
-        });
-        list.sort(
-          (a, b) =>
-            timestampToMillis(b.updatedAt) - timestampToMillis(a.updatedAt)
-        );
-        setGarments(list);
-        setPendingGarmentIds(nextPending);
-        pendingSourcesRef.current.garments =
-          snap.metadata.hasPendingWrites || nextPending.size > 0;
-        syncPendingFlag();
-        snapshotRef.current.garments = list;
+    let active = true;
+    loadLocalDatabase()
+      .then(({ state, engine }) => {
+        if (!active) return;
+        stateRef.current = state;
+        setWardrobeState(state);
+        setStorageEngine(engine);
         setDataLoading(false);
-        persistMirror();
-      },
-      (error) => {
-        reportSnapshotError(error, OperationType.LIST, garmentsPath);
-      }
-    );
-
-    const tripsPath = `users/${uid}/trips`;
-    const tripsQuery = query(
-      collection(db, 'users', uid, 'trips'),
-      where('ownerId', '==', uid)
-    );
-    const unsubTrips = onSnapshot(
-      tripsQuery,
-      { includeMetadataChanges: true },
-      (snap) => {
-        const list: Trip[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as Omit<Trip, 'id'>),
-        }));
-        list.sort(
-          (a, b) =>
-            timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt)
-        );
-        setTrips(list);
-        pendingSourcesRef.current.trips = snap.metadata.hasPendingWrites;
-        syncPendingFlag();
-        snapshotRef.current.trips = list;
-        persistMirror();
-      },
-      (error) => {
-        reportSnapshotError(error, OperationType.LIST, tripsPath);
-      }
-    );
-
-    const movementsPath = `users/${uid}/movements`;
-    const movementsQuery = query(
-      collection(db, 'users', uid, 'movements'),
-      where('ownerId', '==', uid)
-    );
-    const unsubMovements = onSnapshot(
-      movementsQuery,
-      { includeMetadataChanges: true },
-      (snap) => {
-        const list: Movement[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as Omit<Movement, 'id'>),
-        }));
-        list.sort(
-          (a, b) =>
-            timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt)
-        );
-        setMovements(list);
-        pendingSourcesRef.current.movements = snap.metadata.hasPendingWrites;
-        syncPendingFlag();
-        snapshotRef.current.movements = list;
-        persistMirror();
-      },
-      (error) => {
-        reportSnapshotError(error, OperationType.LIST, movementsPath);
-      }
-    );
-
-    const seasonsPath = `users/${uid}/seasons`;
-    const seasonsQuery = query(
-      collection(db, 'users', uid, 'seasons'),
-      where('ownerId', '==', uid)
-    );
-    const unsubSeasons = onSnapshot(
-      seasonsQuery,
-      { includeMetadataChanges: true },
-      (snap) => {
-        const list: SeasonReport[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data() as Omit<SeasonReport, 'id'>),
-        }));
-        list.sort(
-          (a, b) =>
-            timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt)
-        );
-        setSeasons(list);
-        pendingSourcesRef.current.seasons = snap.metadata.hasPendingWrites;
-        syncPendingFlag();
-        snapshotRef.current.seasons = list;
-        persistMirror();
-      },
-      (error) => {
-        reportSnapshotError(error, OperationType.LIST, seasonsPath);
-      }
-    );
+      })
+      .catch(() => {
+        if (!active) return;
+        setStorageEngine('memory');
+        setDataLoading(false);
+      });
 
     return () => {
-      unsubProfile();
-      unsubGarments();
-      unsubTrips();
-      unsubMovements();
-      unsubSeasons();
+      active = false;
     };
-  }, [authReady, user]);
+  }, []);
 
-  const garmentsById = useMemo(() => {
-    const map = new Map<string, Garment>();
-    for (const g of garments) map.set(g.id, g);
-    return map;
-  }, [garments]);
-
-  const handleSignIn = async () => {
-    setIsSigningIn(true);
-    setAuthError(null);
-    try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'No se pudo iniciar sesión.';
-      if (!msg.includes('popup-closed-by-user')) {
-        setAuthError(
-          'No pudimos abrir el inicio de sesión con Google. Revisa si tu navegador bloqueó la ventana emergente.'
-        );
+  const commitTransition = useCallback(
+    async <T,>(
+      updater: (current: LocalWardrobeState) => {
+        nextState: LocalWardrobeState;
+        result: T;
       }
-    } finally {
-      setIsSigningIn(false);
-    }
-  };
+    ): Promise<T> => {
+      const { nextState, result } = updater(stateRef.current);
+      const stampedState: LocalWardrobeState = {
+        ...nextState,
+        updatedAtIso: new Date().toISOString(),
+      };
+      stateRef.current = stampedState;
+      setWardrobeState(stampedState);
 
-  const handleSignOut = async () => {
-    await signOut(auth);
-    setActiveTab('inventario');
-  };
+      const writeOp = writeQueueRef.current.then(async () => {
+        const engine = await saveLocalDatabase(stampedState);
+        setStorageEngine(engine);
+      });
+      writeQueueRef.current = writeOp.catch(() => undefined);
+      await writeOp;
+      return result;
+    },
+    []
+  );
+
+  const commitState = useCallback(
+    async (
+      updater: (current: LocalWardrobeState) => LocalWardrobeState
+    ): Promise<void> => {
+      await commitTransition((current) => ({
+        nextState: updater(current),
+        result: undefined,
+      }));
+    },
+    [commitTransition]
+  );
 
   const handleSaveGarment = async (
     values: GarmentFormValues,
     existing: Garment | null
   ) => {
-    if (!user) return;
     if (existing) {
-      await updateGarment(user.uid, existing.id, values, existing.tripId);
+      await commitState((s) =>
+        updateGarment(s, existing.id, values, existing.tripId)
+      );
     } else {
-      await addGarment(user.uid, values);
+      await commitTransition((s) => {
+        const { nextState, garmentId } = addGarment(s, values);
+        return { nextState, result: garmentId };
+      });
     }
   };
 
-  if (fatalError) {
-    throw fatalError;
-  }
+  const handleExportBackup = () => {
+    const payload = JSON.stringify(stateRef.current, null, 2);
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const dateSlug = new Date().toISOString().slice(0, 10);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `maleta-foranea-respaldo-${dateSlug}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
-  if (!authReady) {
-    return (
-      <div className="min-h-screen flex items-center justify-center p-6">
-        <div className="glass-panel rounded-2xl px-6 py-4">
-          <p className="text-sm text-slate-700 font-medium">
-            Cargando tu maleta...
-          </p>
-        </div>
-      </div>
-    );
-  }
+  const handleImportBackup = async (jsonText: string) => {
+    const parsed = parseImportedBackup(jsonText);
+    await commitState(() => parsed);
+  };
+
+  const { profile, garments, trips, movements, seasons, updatedAtIso } =
+    wardrobeState;
 
   return (
     <div className="min-h-screen flex flex-col">
       <TopBar
         activeTab={activeTab}
         onSelectTab={setActiveTab}
-        isAuthenticated={Boolean(user)}
-        isSigningIn={isSigningIn}
         onPrimaryAction={() => {
-          if (user) {
-            setEditingGarment(null);
-            setModalOpen(true);
-          } else {
-            void handleSignIn();
-          }
+          setEditingGarment(null);
+          setModalOpen(true);
         }}
       />
 
-      {!user ? (
-        <main className="flex-1">
-          <WelcomeLanding
-            onSignIn={handleSignIn}
-            isSigningIn={isSigningIn}
-            authError={authError}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 pb-24 md:pb-12 space-y-6">
+        {activeTab === 'inventario' && (
+          <InventoryView
+            garments={garments}
+            profile={profile}
+            loading={dataLoading}
+            onAddNew={() => {
+              setEditingGarment(null);
+              setModalOpen(true);
+            }}
+            onEdit={(garment) => {
+              setEditingGarment(garment);
+              setModalOpen(true);
+            }}
+            onMoveDirect={(g, dest) =>
+              commitState((s) => moveGarmentDirect(s, g, dest))
+            }
+            onToggleLaundry={(g) =>
+              commitState((s) => toggleLaundryStatus(s, g))
+            }
+            onDelete={(id) => commitState((s) => deleteGarment(s, id))}
+            onSeedStarter={() => commitState((s) => seedStarterWardrobe(s))}
+            onStartTripWithItems={(itemIds, origin) => {
+              setPrefilledTripDraft({ itemIds, origin });
+              setActiveTab('maletas');
+            }}
           />
-        </main>
-      ) : (
-        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 pb-24 md:pb-12 space-y-6">
-          {/* Authentic Offline / Pending-Sync Notice (shown ONLY when offline or syncing local changes) */}
-          {(!isOnline || hasPendingSync) && (
-            <div
-              role="status"
-              className="no-print glass-panel rounded-2xl px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-amber-200/80"
-            >
-              <div className="flex items-center gap-2.5 text-xs sm:text-sm text-slate-800">
-                {!isOnline ? (
-                  <>
-                    <CloudOff className="w-4 h-4 text-amber-700 shrink-0" />
-                    <span>
-                      <strong className="font-semibold">
-                        Modo sin conexión (en tránsito):
-                      </strong>{' '}
-                      puedes consultar, agregar y mover prendas. Todo se guarda
-                      en IndexedDB y se sincronizará al volver la señal.
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <RefreshCw className="w-4 h-4 text-blue-700 animate-spin shrink-0" />
-                    <span>
-                      Sincronizando cambios locales guardados en tránsito con la
-                      nube...
-                    </span>
-                  </>
-                )}
-              </div>
-              {pendingGarmentIds.size > 0 && (
-                <span className="text-xs font-mono-tabular font-semibold text-amber-800 whitespace-nowrap pl-6 sm:pl-0">
-                  {pendingGarmentIds.size}{' '}
-                  {pendingGarmentIds.size === 1
-                    ? 'prenda en cola'
-                    : 'prendas en cola'}
-                </span>
-              )}
-            </div>
-          )}
+        )}
 
-          {activeTab === 'inventario' && (
-            <InventoryView
-              garments={garments}
-              profile={profile}
-              loading={dataLoading}
-              pendingIds={pendingGarmentIds}
-              onAddNew={() => {
-                setEditingGarment(null);
-                setModalOpen(true);
-              }}
-              onEdit={(garment) => {
-                setEditingGarment(garment);
-                setModalOpen(true);
-              }}
-              onMoveDirect={(g, dest) => moveGarmentDirect(user.uid, g, dest)}
-              onToggleLaundry={(g) => toggleLaundryStatus(user.uid, g)}
-              onDelete={(id) => deleteGarment(user.uid, id)}
-              onSeedStarter={() => seedStarterWardrobe(user.uid)}
-              onStartTripWithItems={(itemIds, origin) => {
-                setPrefilledTripDraft({ itemIds, origin });
-                setActiveTab('maletas');
-              }}
-            />
-          )}
+        {activeTab === 'maletas' && (
+          <TripsView
+            trips={trips}
+            garments={garments}
+            profile={profile}
+            prefilledTripDraft={prefilledTripDraft}
+            onClearPrefill={() => setPrefilledTripDraft(null)}
+            onCreateTrip={(input) =>
+              commitTransition((s) => {
+                const { nextState, tripId } = createTrip(s, input);
+                return { nextState, result: tripId };
+              })
+            }
+            onAddGarmentToTrip={(trip, garmentId) =>
+              commitState((s) => addGarmentToTrip(s, trip, garmentId))
+            }
+            onRemoveGarmentFromTrip={(trip, garment) =>
+              commitState((s) => removeGarmentFromTrip(s, trip, garment))
+            }
+            onTogglePacked={(trip, garment) =>
+              commitState((s) => toggleTripPackedItem(s, trip, garment))
+            }
+            onCompleteTrip={(trip) =>
+              commitTransition((s) => {
+                const { nextState, movedCount } = completeTripAndUnpack(s, trip);
+                return { nextState, result: movedCount };
+              })
+            }
+            onDeleteTrip={(trip) => commitState((s) => deleteTrip(s, trip))}
+          />
+        )}
 
-          {activeTab === 'maletas' && (
-            <TripsView
-              trips={trips}
-              garments={garments}
-              profile={profile}
-              prefilledTripDraft={prefilledTripDraft}
-              onClearPrefill={() => setPrefilledTripDraft(null)}
-              onCreateTrip={(input) => createTrip(user.uid, input)}
-              onAddGarmentToTrip={(trip, garmentId) =>
-                addGarmentToTrip(user.uid, trip, garmentId)
-              }
-              onRemoveGarmentFromTrip={(trip, garment) =>
-                removeGarmentFromTrip(user.uid, trip, garment)
-              }
-              onTogglePacked={(trip, garment) =>
-                toggleTripPackedItem(user.uid, trip, garment)
-              }
-              onCompleteTrip={(trip) =>
-                completeTripAndUnpack(user.uid, trip, garmentsById)
-              }
-              onDeleteTrip={(trip) => deleteTrip(user.uid, trip, garments)}
-            />
-          )}
+        {activeTab === 'estadisticas' && (
+          <StatsView
+            garments={garments}
+            trips={trips}
+            movements={movements}
+            profile={profile}
+            onAddNew={() => {
+              setEditingGarment(null);
+              setModalOpen(true);
+            }}
+            onOpenSeasonReport={() => {
+              setHistorySubTab('temporada');
+              setActiveTab('historial');
+            }}
+          />
+        )}
 
-          {activeTab === 'estadisticas' && (
-            <StatsView
-              garments={garments}
-              trips={trips}
-              movements={movements}
-              profile={profile}
-              onAddNew={() => {
-                setEditingGarment(null);
-                setModalOpen(true);
-              }}
-              onOpenSeasonReport={() => {
-                setHistorySubTab('temporada');
-                setActiveTab('historial');
-              }}
-            />
-          )}
+        {activeTab === 'pendientes' && (
+          <EssentialsAndLaundryView
+            garments={garments}
+            profile={profile}
+            storageEngine={storageEngine}
+            tripsCount={trips.length}
+            movementsCount={movements.length}
+            seasonsCount={seasons.length}
+            lastSavedIso={updatedAtIso}
+            onExportBackup={handleExportBackup}
+            onImportBackup={handleImportBackup}
+            onMoveDirect={(g, dest) =>
+              commitState((s) => moveGarmentDirect(s, g, dest))
+            }
+            onToggleLaundry={(g) =>
+              commitState((s) => toggleLaundryStatus(s, g))
+            }
+            onSaveLabels={(cityLabel, ranchLabel) =>
+              commitState((s) => updateLocationLabels(s, cityLabel, ranchLabel))
+            }
+          />
+        )}
 
-          {activeTab === 'pendientes' && (
-            <EssentialsAndLaundryView
-              garments={garments}
-              profile={profile}
-              userEmail={user.email || ''}
-              isOnline={isOnline}
-              indexedDbActive={isIndexedDbPersistenceActive}
-              pendingSyncCount={pendingGarmentIds.size}
-              lastBackupIso={lastBackupIso}
-              onSyncNow={syncPendingWrites}
-              onMoveDirect={(g, dest) => moveGarmentDirect(user.uid, g, dest)}
-              onToggleLaundry={(g) => toggleLaundryStatus(user.uid, g)}
-              onSaveLabels={(cityLabel, ranchLabel) =>
-                updateLocationLabels(user.uid, cityLabel, ranchLabel)
-              }
-              onSignOut={handleSignOut}
-            />
-          )}
-
-          {activeTab === 'historial' && (
-            <HistoryView
-              movements={movements}
-              trips={trips}
-              garments={garments}
-              seasons={seasons}
-              profile={profile}
-              subTab={historySubTab}
-              onChangeSubTab={setHistorySubTab}
-              onDeleteMovement={(id) => deleteMovement(user.uid, id)}
-              onSaveSeason={(input) => saveSeasonReport(user.uid, input)}
-              onDeleteSeason={(id) => deleteSeasonReport(user.uid, id)}
-            />
-          )}
-        </main>
-      )}
+        {activeTab === 'historial' && (
+          <HistoryView
+            movements={movements}
+            trips={trips}
+            garments={garments}
+            seasons={seasons}
+            profile={profile}
+            subTab={historySubTab}
+            onChangeSubTab={setHistorySubTab}
+            onDeleteMovement={(id) =>
+              commitState((s) => deleteMovement(s, id))
+            }
+            onSaveSeason={(input) =>
+              commitTransition((s) => {
+                const { nextState, seasonId } = saveSeasonReport(s, input);
+                return { nextState, result: seasonId };
+              })
+            }
+            onDeleteSeason={(id) =>
+              commitState((s) => deleteSeasonReport(s, id))
+            }
+          />
+        )}
+      </main>
 
       <GarmentModal
         isOpen={modalOpen}

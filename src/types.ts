@@ -1,4 +1,4 @@
-import type { Timestamp } from 'firebase/firestore';
+export type LocalTimestamp = number | string | { __ms: number } | null;
 
 export type GarmentCategory =
   | 'playeras'
@@ -41,8 +41,8 @@ export interface UserProfile {
   email: string;
   cityLabel: string;
   ranchLabel: string;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  createdAt: LocalTimestamp;
+  updatedAt: LocalTimestamp;
 }
 
 export interface Garment {
@@ -58,8 +58,8 @@ export interface Garment {
   notes: string;
   quantity: number;
   tripId: string;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  createdAt: LocalTimestamp;
+  updatedAt: LocalTimestamp;
 }
 
 export interface Trip {
@@ -73,8 +73,8 @@ export interface Trip {
   itemIds: string[];
   packedIds: string[];
   notes: string;
-  createdAt: Timestamp | null;
-  updatedAt: Timestamp | null;
+  createdAt: LocalTimestamp;
+  updatedAt: LocalTimestamp;
 }
 
 export interface Movement {
@@ -85,7 +85,7 @@ export interface Movement {
   fromLocation: GarmentLocation;
   toLocation: GarmentLocation;
   tripTitle: string;
-  createdAt: Timestamp | null;
+  createdAt: LocalTimestamp;
 }
 
 export interface SeasonReport {
@@ -104,7 +104,7 @@ export interface SeasonReport {
   topMovedNames: string[];
   movedSummaryLines: string[];
   notes: string;
-  createdAt: Timestamp | null;
+  createdAt: LocalTimestamp;
 }
 
 export interface GarmentFormValues {

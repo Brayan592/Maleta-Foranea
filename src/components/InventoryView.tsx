@@ -32,7 +32,6 @@ interface InventoryViewProps {
   garments: Garment[];
   profile: UserProfile | null;
   loading: boolean;
-  pendingIds?: Set<string>;
   onAddNew: () => void;
   onEdit: (garment: Garment) => void;
   onMoveDirect: (garment: Garment, toLocation: GarmentLocation) => Promise<void>;
@@ -46,7 +45,6 @@ export function InventoryView({
   garments,
   profile,
   loading,
-  pendingIds,
   onAddNew,
   onEdit,
   onMoveDirect,
@@ -518,14 +516,6 @@ export function InventoryView({
                           <span aria-hidden="true">·</span>
                           <span className="truncate max-w-xs text-slate-600">
                             {garment.notes}
-                          </span>
-                        </>
-                      )}
-                      {pendingIds?.has(garment.id) && (
-                        <>
-                          <span aria-hidden="true">·</span>
-                          <span className="text-amber-700 font-medium">
-                            Pendiente de sincronizar
                           </span>
                         </>
                       )}

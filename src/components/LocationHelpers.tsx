@@ -9,8 +9,12 @@ import {
   Trees,
   Watch,
 } from 'lucide-react';
-import type { Timestamp } from 'firebase/firestore';
-import type { GarmentCategory, GarmentLocation, UserProfile } from '../types';
+import type {
+  GarmentCategory,
+  GarmentLocation,
+  LocalTimestamp,
+  UserProfile,
+} from '../types';
 
 export function getLocationLabel(
   location: GarmentLocation,
@@ -70,10 +74,17 @@ export function CategoryIcon({
 }
 
 export function timestampToDate(ts: unknown): Date | null {
-  if (!ts) return null;
+  if (ts === null || ts === undefined) return null;
+  if (typeof ts === 'number' && Number.isFinite(ts)) {
+    const d = new Date(ts);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof ts === 'string') {
+    const d = new Date(ts);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
   if (
     typeof ts === 'object' &&
-    ts !== null &&
     'toDate' in ts &&
     typeof (ts as { toDate: () => Date }).toDate === 'function'
   ) {
@@ -81,7 +92,6 @@ export function timestampToDate(ts: unknown): Date | null {
   }
   if (
     typeof ts === 'object' &&
-    ts !== null &&
     '__ms' in ts &&
     typeof (ts as { __ms: number }).__ms === 'number'
   ) {
@@ -90,14 +100,14 @@ export function timestampToDate(ts: unknown): Date | null {
   return null;
 }
 
-export function timestampToMillis(ts: Timestamp | null | undefined): number {
+export function timestampToMillis(ts: LocalTimestamp | undefined): number {
   if (!ts) return Date.now();
   const d = timestampToDate(ts);
   return d ? d.getTime() : Date.now();
 }
 
-export function formatShortDate(ts: Timestamp | null | undefined): string {
-  if (!ts) return 'Pendiente de sincronizar';
+export function formatShortDate(ts: LocalTimestamp | undefined): string {
+  if (!ts) return 'Reciente';
   try {
     const date = timestampToDate(ts);
     if (!date) return 'Reciente';

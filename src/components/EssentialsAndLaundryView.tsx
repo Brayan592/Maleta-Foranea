@@ -1,13 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeftRight,
   Check,
   Database,
+  Download,
   Droplets,
-  LogOut,
   MapPin,
-  RefreshCw,
   Star,
+  Upload,
 } from 'lucide-react';
 import {
   CATEGORY_LABEL_MAP,
@@ -16,6 +16,7 @@ import {
   type GarmentLocation,
   type UserProfile,
 } from '../types';
+import type { LocalStorageEngine } from '../services/localDatabase';
 import {
   getLocationLabel,
   getLocationTextClass,
@@ -25,31 +26,31 @@ import {
 interface EssentialsAndLaundryViewProps {
   garments: Garment[];
   profile: UserProfile | null;
-  userEmail: string;
-  isOnline: boolean;
-  indexedDbActive: boolean;
-  pendingSyncCount: number;
-  lastBackupIso: string | null;
-  onSyncNow: () => Promise<void>;
+  storageEngine: LocalStorageEngine;
+  tripsCount: number;
+  movementsCount: number;
+  seasonsCount: number;
+  lastSavedIso: string | null;
+  onExportBackup: () => void;
+  onImportBackup: (jsonText: string) => Promise<void>;
   onMoveDirect: (garment: Garment, toLocation: GarmentLocation) => Promise<void>;
   onToggleLaundry: (garment: Garment) => Promise<void>;
   onSaveLabels: (cityLabel: string, ranchLabel: string) => Promise<void>;
-  onSignOut: () => Promise<void>;
 }
 
 export function EssentialsAndLaundryView({
   garments,
   profile,
-  userEmail,
-  isOnline,
-  indexedDbActive,
-  pendingSyncCount,
-  lastBackupIso,
-  onSyncNow,
+  storageEngine,
+  tripsCount,
+  movementsCount,
+  seasonsCount,
+  lastSavedIso,
+  onExportBackup,
+  onImportBackup,
   onMoveDirect,
   onToggleLaundry,
   onSaveLabels,
-  onSignOut,
 }: EssentialsAndLaundryViewProps) {
   const cityLabel = profile?.cityLabel || 'La Ciudad';
   const ranchLabel = profile?.ranchLabel || 'El Rancho';
@@ -58,7 +59,10 @@ export function EssentialsAndLaundryView({
   const [ranchInput, setRanchInput] = useState(ranchLabel);
   const [savingLabels, setSavingLabels] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setCityInput(cityLabel);
@@ -107,28 +111,56 @@ export function EssentialsAndLaundryView({
     }
   };
 
-  const handleManualSync = async () => {
-    setSyncing(true);
+  const handleExport = () => {
+    setBackupError(null);
+    onExportBackup();
+    setBackupNotice('Respaldo descargado en formato JSON.');
+    setTimeout(() => setBackupNotice(null), 3500);
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setImporting(true);
+    setBackupError(null);
+    setBackupNotice(null);
     try {
-      await onSyncNow();
+      const text = await file.text();
+      await onImportBackup(text);
+      setBackupNotice('Respaldo restaurado en la base de datos local.');
+      setTimeout(() => setBackupNotice(null), 4000);
+    } catch (err) {
+      setBackupError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo leer el archivo de respaldo.'
+      );
     } finally {
-      setSyncing(false);
+      setImporting(false);
     }
   };
 
-  const formattedBackupTime = useMemo(() => {
-    if (!lastBackupIso) return 'Respaldo automático activo';
+  const storageEngineLabel =
+    storageEngine === 'indexeddb'
+      ? 'IndexedDB local'
+      : storageEngine === 'localstorage'
+        ? 'Almacenamiento local (navegador)'
+        : 'Memoria temporal';
+
+  const formattedSavedTime = useMemo(() => {
+    if (!lastSavedIso) return 'Guardado automático activo';
     try {
       return new Intl.DateTimeFormat('es-MX', {
         day: 'numeric',
         month: 'short',
         hour: '2-digit',
         minute: '2-digit',
-      }).format(new Date(lastBackupIso));
+      }).format(new Date(lastSavedIso));
     } catch {
       return 'Reciente';
     }
-  }, [lastBackupIso]);
+  }, [lastSavedIso]);
 
   return (
     <div className="space-y-10">
@@ -406,76 +438,79 @@ export function EssentialsAndLaundryView({
             <div className="flex items-center gap-2">
               <Database className="w-4 h-4 text-slate-700" />
               <h2 className="font-display text-base font-semibold text-slate-900">
-                Respaldo offline (IndexedDB) y cuenta
+                Base de datos local (IndexedDB)
               </h2>
             </div>
 
             <div className="glass-subtle rounded-xl p-3.5 space-y-1.5 text-xs text-slate-700">
               <div className="flex items-center justify-between">
-                <span>Estado de red</span>
-                <span
-                  className={`font-semibold ${
-                    isOnline ? 'text-emerald-800' : 'text-amber-800'
-                  }`}
-                >
-                  {isOnline ? 'En línea' : 'Sin conexión (en tránsito)'}
+                <span>Motor de guardado</span>
+                <span className="font-semibold text-emerald-800">
+                  {storageEngineLabel}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span>Caché IndexedDB</span>
-                <span className="font-semibold text-slate-900">
-                  {indexedDbActive ? 'Activa' : 'Solo respaldo local'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>Prendas en caché</span>
+                <span>Prendas guardadas</span>
                 <span className="font-mono-tabular font-semibold text-slate-900">
                   {garments.length}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span>Cambios por sincronizar</span>
+                <span>Maletas, traslados y temporadas</span>
                 <span className="font-mono-tabular font-semibold text-slate-900">
-                  {pendingSyncCount}
+                  {tripsCount} · {movementsCount} · {seasonsCount}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span>Último respaldo local</span>
+                <span>Último guardado local</span>
                 <span className="font-mono-tabular text-slate-600">
-                  {formattedBackupTime}
+                  {formattedSavedTime}
                 </span>
               </div>
             </div>
 
-            <p className="text-xs text-slate-600 truncate">
-              Cuenta: {userEmail || 'Sesión iniciada con Google'}
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Toda tu ropa, viajes y reportes se guardan directamente en este
+              dispositivo sin necesidad de internet ni cuentas externas.
             </p>
+
+            {backupNotice && (
+              <p className="text-xs font-medium text-emerald-800">
+                {backupNotice}
+              </p>
+            )}
+            {backupError && (
+              <p className="text-xs font-medium text-rose-700">{backupError}</p>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            {isOnline && (
-              <button
-                type="button"
-                onClick={handleManualSync}
-                disabled={syncing}
-                className="glass-subtle inline-flex items-center gap-2 px-4 py-2.5 min-h-[42px] text-slate-800 text-xs font-medium rounded-xl hover:bg-white/80 transition-colors cursor-pointer disabled:opacity-60"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`}
-                />
-                <span>
-                  {syncing ? 'Sincronizando...' : 'Sincronizar ahora'}
-                </span>
-              </button>
-            )}
-
             <button
               type="button"
-              onClick={onSignOut}
-              className="glass-subtle inline-flex items-center justify-center gap-2 px-4 py-2.5 min-h-[42px] text-slate-800 text-xs font-medium rounded-xl hover:bg-white/80 transition-colors cursor-pointer"
+              onClick={handleExport}
+              className="glass-btn-primary inline-flex items-center gap-2 px-4 py-2.5 min-h-[42px] text-white text-xs font-medium rounded-xl transition-colors cursor-pointer"
             >
-              <LogOut className="w-3.5 h-3.5" />
-              <span>Cerrar sesión</span>
+              <Download className="w-3.5 h-3.5" />
+              <span>Exportar respaldo (.json)</span>
+            </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+            <button
+              type="button"
+              disabled={importing}
+              onClick={() => fileInputRef.current?.click()}
+              className="glass-subtle inline-flex items-center gap-2 px-4 py-2.5 min-h-[42px] text-slate-800 text-xs font-medium rounded-xl hover:bg-white/80 transition-colors cursor-pointer disabled:opacity-60"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>
+                {importing ? 'Importando...' : 'Importar respaldo (.json)'}
+              </span>
             </button>
           </div>
         </div>

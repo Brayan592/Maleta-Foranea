@@ -1,28 +1,18 @@
 import {
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  getDocFromCache,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  waitForPendingWrites,
-  writeBatch,
-} from 'firebase/firestore';
-import type { User } from 'firebase/auth';
-import { db, handleFirestoreError, OperationType } from '../firebase';
-import {
   LIMITS,
   STARTER_GARMENTS,
   type Garment,
   type GarmentFormValues,
   type GarmentLocation,
   type LaundryStatus,
+  type Movement,
+  type SeasonReport,
   type TargetLocation,
   type Trip,
   type TripEndpoint,
 } from '../types';
+import { timestampToMillis } from '../components/LocationHelpers';
+import type { LocalWardrobeState } from './localDatabase';
 
 function clampString(val: string, maxLen: number): string {
   return val.trim().slice(0, maxLen);
@@ -38,297 +28,248 @@ function clampNonNegativeInt(val: number, maxVal: number): number {
   return Math.max(0, Math.min(maxVal, n));
 }
 
-/**
- * Executes a Firestore write with offline-resilience:
- * When IndexedDB persistentLocalCache is enabled, Firestore immediately commits
- * locally and triggers onSnapshot, while the Promise waits for server ack.
- * When offline or on a weak highway connection, we let the write stay queued in
- * IndexedDB instead of blocking the UI indefinitely.
- */
-async function runOfflineSafeWrite(
-  writeOp: () => Promise<void>,
-  operationType: OperationType,
-  path: string
-): Promise<void> {
-  const isOffline =
-    typeof navigator !== 'undefined' && navigator.onLine === false;
-
-  const promise = writeOp();
-
-  if (isOffline) {
-    promise.catch((err) => {
-      console.warn(`Escritura en cola (${path}) falló al sincronizar:`, err);
-    });
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    return;
+function createLocalId(prefix = 'id'): string {
+  if (
+    typeof crypto !== 'undefined' &&
+    typeof crypto.randomUUID === 'function'
+  ) {
+    return crypto.randomUUID();
   }
-
-  let settled = false;
-  const wrapped = promise
-    .then(() => {
-      settled = true;
-    })
-    .catch((err) => {
-      settled = true;
-      handleFirestoreError(err, operationType, path);
-    });
-
-  const timeout = new Promise<void>((resolve) => {
-    setTimeout(() => {
-      if (!settled) {
-        console.info(
-          `Conexión lenta en ${path}; cambio guardado localmente en IndexedDB para sincronizar en segundo plano.`
-        );
-      }
-      resolve();
-    }, 2800);
-  });
-
-  await Promise.race([wrapped, timeout]);
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
-export async function syncPendingWrites(): Promise<void> {
-  await waitForPendingWrites(db);
+function sortByUpdatedDesc(garments: Garment[]): Garment[] {
+  return [...garments].sort(
+    (a, b) => timestampToMillis(b.updatedAt) - timestampToMillis(a.updatedAt)
+  );
 }
 
-export async function ensureUserProfile(user: User): Promise<void> {
-  const userPath = `users/${user.uid}`;
-  const userRef = doc(db, 'users', user.uid);
-  const isOffline =
-    typeof navigator !== 'undefined' && navigator.onLine === false;
-
-  try {
-    let exists = false;
-    if (isOffline) {
-      try {
-        const cached = await getDocFromCache(userRef);
-        exists = cached.exists();
-      } catch {
-        exists = false;
-      }
-    } else {
-      const snap = await getDoc(userRef);
-      exists = snap.exists();
-    }
-
-    if (!exists) {
-      const displayName = clampString(
-        user.displayName || user.email?.split('@')[0] || 'Foráneo',
-        LIMITS.DISPLAY_NAME_MAX
-      );
-      const email = clampString(user.email || '', LIMITS.EMAIL_MAX);
-      await runOfflineSafeWrite(
-        () =>
-          setDoc(userRef, {
-            uid: user.uid,
-            displayName: displayName || 'Foráneo',
-            email,
-            cityLabel: 'La Ciudad',
-            ranchLabel: 'El Rancho',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          }),
-        OperationType.WRITE,
-        userPath
-      );
-    }
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes('offline') || msg.includes('unavailable')) {
-      console.warn('No se pudo verificar perfil en servidor (modo offline).');
-      return;
-    }
-    handleFirestoreError(error, OperationType.WRITE, userPath);
-  }
+function sortByCreatedDesc<T extends { createdAt: Garment['createdAt'] }>(
+  items: T[]
+): T[] {
+  return [...items].sort(
+    (a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt)
+  );
 }
 
-export async function updateLocationLabels(
-  userId: string,
+export function updateLocationLabels(
+  state: LocalWardrobeState,
   cityLabel: string,
   ranchLabel: string
-): Promise<void> {
-  const path = `users/${userId}`;
+): LocalWardrobeState {
   const cleanCity =
     clampString(cityLabel, LIMITS.CITY_RANCH_LABEL_MAX) || 'La Ciudad';
   const cleanRanch =
     clampString(ranchLabel, LIMITS.CITY_RANCH_LABEL_MAX) || 'El Rancho';
 
-  await runOfflineSafeWrite(
-    () =>
-      updateDoc(doc(db, 'users', userId), {
-        cityLabel: cleanCity,
-        ranchLabel: cleanRanch,
-        updatedAt: serverTimestamp(),
-      }),
-    OperationType.UPDATE,
-    path
-  );
+  return {
+    ...state,
+    profile: {
+      ...state.profile,
+      cityLabel: cleanCity,
+      ranchLabel: cleanRanch,
+      updatedAt: Date.now(),
+    },
+  };
 }
 
-export async function addGarment(
-  userId: string,
+export function addGarment(
+  state: LocalWardrobeState,
   values: GarmentFormValues
-): Promise<string> {
-  const garmentsCol = collection(db, 'users', userId, 'garments');
-  const newRef = doc(garmentsCol);
-  const path = `users/${userId}/garments/${newRef.id}`;
+): { nextState: LocalWardrobeState; garmentId: string } {
   const name = clampString(values.name, LIMITS.NAME_MAX);
   if (!name) {
     throw new Error('El nombre de la prenda es obligatorio.');
   }
 
-  await runOfflineSafeWrite(
-    () =>
-      setDoc(newRef, {
-        ownerId: userId,
-        name,
-        category: values.category,
-        color: clampString(values.color, LIMITS.COLOR_MAX),
-        location: values.location,
-        targetLocation:
-          values.location === 'maleta' ? values.targetLocation : 'ninguno',
-        laundryStatus: values.laundryStatus,
-        isEssential: Boolean(values.isEssential),
-        notes: clampString(values.notes, LIMITS.NOTES_MAX),
-        quantity: clampQuantity(values.quantity),
-        tripId: '',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      }),
-    OperationType.CREATE,
-    path
-  );
+  const now = Date.now();
+  const garmentId = createLocalId('g');
+  const newGarment: Garment = {
+    id: garmentId,
+    ownerId: state.profile.uid || 'local-user',
+    name,
+    category: values.category,
+    color: clampString(values.color, LIMITS.COLOR_MAX),
+    location: values.location,
+    targetLocation:
+      values.location === 'maleta' ? values.targetLocation : 'ninguno',
+    laundryStatus: values.laundryStatus,
+    isEssential: Boolean(values.isEssential),
+    notes: clampString(values.notes, LIMITS.NOTES_MAX),
+    quantity: clampQuantity(values.quantity),
+    tripId: '',
+    createdAt: now,
+    updatedAt: now,
+  };
 
-  return newRef.id;
+  return {
+    garmentId,
+    nextState: {
+      ...state,
+      garments: sortByUpdatedDesc([newGarment, ...state.garments]),
+    },
+  };
 }
 
-export async function updateGarment(
-  userId: string,
+export function updateGarment(
+  state: LocalWardrobeState,
   garmentId: string,
   values: GarmentFormValues,
   tripId: string
-): Promise<void> {
-  const path = `users/${userId}/garments/${garmentId}`;
+): LocalWardrobeState {
   const name = clampString(values.name, LIMITS.NAME_MAX);
   if (!name) {
     throw new Error('El nombre de la prenda es obligatorio.');
   }
   const cleanTarget: TargetLocation =
     values.location === 'maleta' ? values.targetLocation : 'ninguno';
+  const now = Date.now();
 
-  await runOfflineSafeWrite(
-    () =>
-      updateDoc(doc(db, 'users', userId, 'garments', garmentId), {
-        name,
-        category: values.category,
-        color: clampString(values.color, LIMITS.COLOR_MAX),
-        location: values.location,
-        targetLocation: cleanTarget,
-        laundryStatus: values.laundryStatus,
-        isEssential: Boolean(values.isEssential),
-        notes: clampString(values.notes, LIMITS.NOTES_MAX),
-        quantity: clampQuantity(values.quantity),
-        tripId: values.location === 'maleta' ? clampString(tripId, 128) : '',
-        updatedAt: serverTimestamp(),
-      }),
-    OperationType.UPDATE,
-    path
-  );
+  const nextGarments = state.garments.map((g) => {
+    if (g.id !== garmentId) return g;
+    return {
+      ...g,
+      name,
+      category: values.category,
+      color: clampString(values.color, LIMITS.COLOR_MAX),
+      location: values.location,
+      targetLocation: cleanTarget,
+      laundryStatus: values.laundryStatus,
+      isEssential: Boolean(values.isEssential),
+      notes: clampString(values.notes, LIMITS.NOTES_MAX),
+      quantity: clampQuantity(values.quantity),
+      tripId: values.location === 'maleta' ? clampString(tripId, 128) : '',
+      updatedAt: now,
+    };
+  });
+
+  return {
+    ...state,
+    garments: sortByUpdatedDesc(nextGarments),
+  };
 }
 
-export async function moveGarmentDirect(
-  userId: string,
+export function moveGarmentDirect(
+  state: LocalWardrobeState,
   garment: Garment,
   toLocation: GarmentLocation,
   tripTitle = 'Traslado directo'
-): Promise<void> {
-  if (garment.location === toLocation) return;
-  const garmentPath = `users/${userId}/garments/${garment.id}`;
+): LocalWardrobeState {
+  if (garment.location === toLocation) return state;
+  const now = Date.now();
 
-  const batch = writeBatch(db);
-  const garmentRef = doc(db, 'users', userId, 'garments', garment.id);
-  batch.update(garmentRef, {
-    location: toLocation,
-    targetLocation: 'ninguno',
-    tripId: '',
-    updatedAt: serverTimestamp(),
+  const nextGarments = state.garments.map((g) => {
+    if (g.id !== garment.id) return g;
+    return {
+      ...g,
+      location: toLocation,
+      targetLocation: 'ninguno' as TargetLocation,
+      tripId: '',
+      updatedAt: now,
+    };
   });
 
-  const movementRef = doc(collection(db, 'users', userId, 'movements'));
-  batch.set(movementRef, {
-    ownerId: userId,
+  const movement: Movement = {
+    id: createLocalId('mov'),
+    ownerId: state.profile.uid || 'local-user',
     garmentId: garment.id,
     garmentName: clampString(garment.name, LIMITS.NAME_MAX),
     fromLocation: garment.location,
     toLocation,
     tripTitle: clampString(tripTitle, LIMITS.TRIP_TITLE_MAX),
-    createdAt: serverTimestamp(),
-  });
+    createdAt: now,
+  };
 
-  await runOfflineSafeWrite(
-    () => batch.commit(),
-    OperationType.WRITE,
-    garmentPath
-  );
+  return {
+    ...state,
+    garments: sortByUpdatedDesc(nextGarments),
+    movements: sortByCreatedDesc([movement, ...state.movements]),
+  };
 }
 
-export async function toggleLaundryStatus(
-  userId: string,
+export function toggleLaundryStatus(
+  state: LocalWardrobeState,
   garment: Garment
-): Promise<void> {
-  const path = `users/${userId}/garments/${garment.id}`;
+): LocalWardrobeState {
   const nextStatus: LaundryStatus =
     garment.laundryStatus === 'limpia' ? 'por_lavar' : 'limpia';
+  const now = Date.now();
 
-  await runOfflineSafeWrite(
-    () =>
-      updateDoc(doc(db, 'users', userId, 'garments', garment.id), {
-        laundryStatus: nextStatus,
-        updatedAt: serverTimestamp(),
-      }),
-    OperationType.UPDATE,
-    path
+  const nextGarments = state.garments.map((g) =>
+    g.id === garment.id
+      ? {
+          ...g,
+          laundryStatus: nextStatus,
+          updatedAt: now,
+        }
+      : g
   );
+
+  return {
+    ...state,
+    garments: sortByUpdatedDesc(nextGarments),
+  };
 }
 
-export async function deleteGarment(
-  userId: string,
+export function deleteGarment(
+  state: LocalWardrobeState,
   garmentId: string
-): Promise<void> {
-  const path = `users/${userId}/garments/${garmentId}`;
-  await runOfflineSafeWrite(
-    () => deleteDoc(doc(db, 'users', userId, 'garments', garmentId)),
-    OperationType.DELETE,
-    path
-  );
+): LocalWardrobeState {
+  const now = Date.now();
+  const nextGarments = state.garments.filter((g) => g.id !== garmentId);
+  const nextTrips = state.trips.map((trip) => {
+    if (trip.status === 'completado') return trip;
+    if (!trip.itemIds.includes(garmentId) && !trip.packedIds.includes(garmentId)) {
+      return trip;
+    }
+    const nextItems = trip.itemIds.filter((id) => id !== garmentId);
+    const nextPacked = trip.packedIds.filter((id) => id !== garmentId);
+    return {
+      ...trip,
+      itemIds: nextItems,
+      packedIds: nextPacked,
+      status: nextPacked.length > 0 ? ('en_camino' as const) : ('planeando' as const),
+      updatedAt: now,
+    };
+  });
+
+  return {
+    ...state,
+    garments: nextGarments,
+    trips: nextTrips,
+  };
 }
 
-export async function seedStarterWardrobe(userId: string): Promise<void> {
-  const path = `users/${userId}/garments`;
-  const batch = writeBatch(db);
-  for (const item of STARTER_GARMENTS) {
-    const ref = doc(collection(db, 'users', userId, 'garments'));
-    batch.set(ref, {
-      ownerId: userId,
-      name: clampString(item.name, LIMITS.NAME_MAX),
-      category: item.category,
-      color: clampString(item.color, LIMITS.COLOR_MAX),
-      location: item.location,
-      targetLocation: 'ninguno',
-      laundryStatus: item.laundryStatus,
-      isEssential: item.isEssential,
-      notes: clampString(item.notes, LIMITS.NOTES_MAX),
-      quantity: clampQuantity(item.quantity),
-      tripId: '',
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  }
-  await runOfflineSafeWrite(() => batch.commit(), OperationType.WRITE, path);
+export function seedStarterWardrobe(
+  state: LocalWardrobeState
+): LocalWardrobeState {
+  const baseTime = Date.now();
+  const ownerId = state.profile.uid || 'local-user';
+  const starterItems: Garment[] = STARTER_GARMENTS.map((item, idx) => ({
+    id: createLocalId(`seed_${idx}`),
+    ownerId,
+    name: clampString(item.name, LIMITS.NAME_MAX),
+    category: item.category,
+    color: clampString(item.color, LIMITS.COLOR_MAX),
+    location: item.location,
+    targetLocation: 'ninguno',
+    laundryStatus: item.laundryStatus,
+    isEssential: item.isEssential,
+    notes: clampString(item.notes, LIMITS.NOTES_MAX),
+    quantity: clampQuantity(item.quantity),
+    tripId: '',
+    createdAt: baseTime - idx,
+    updatedAt: baseTime - idx,
+  }));
+
+  return {
+    ...state,
+    garments: sortByUpdatedDesc([...starterItems, ...state.garments]),
+  };
 }
 
-export async function createTrip(
-  userId: string,
+export function createTrip(
+  state: LocalWardrobeState,
   input: {
     title: string;
     origin: TripEndpoint;
@@ -337,7 +278,7 @@ export async function createTrip(
     notes: string;
     initialItemIds?: string[];
   }
-): Promise<string> {
+): { nextState: LocalWardrobeState; tripId: string } {
   if (input.origin === input.destination) {
     throw new Error('El origen y el destino del viaje deben ser distintos.');
   }
@@ -346,214 +287,269 @@ export async function createTrip(
     throw new Error('El título del viaje es obligatorio.');
   }
 
-  const tripRef = doc(collection(db, 'users', userId, 'trips'));
-  const path = `users/${userId}/trips/${tripRef.id}`;
+  const now = Date.now();
+  const tripId = createLocalId('trip');
   const cleanItems = (input.initialItemIds || []).slice(
     0,
     LIMITS.TRIP_ITEMS_MAX
   );
 
-  await runOfflineSafeWrite(
-    () =>
-      setDoc(tripRef, {
-        ownerId: userId,
-        title,
-        origin: input.origin,
-        destination: input.destination,
-        status: 'planeando',
-        travelDate: clampString(input.travelDate, LIMITS.TRAVEL_DATE_MAX),
-        itemIds: cleanItems,
-        packedIds: [],
-        notes: clampString(input.notes, LIMITS.NOTES_MAX),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      }),
-    OperationType.CREATE,
-    path
-  );
+  const newTrip: Trip = {
+    id: tripId,
+    ownerId: state.profile.uid || 'local-user',
+    title,
+    origin: input.origin,
+    destination: input.destination,
+    status: 'planeando',
+    travelDate: clampString(input.travelDate, LIMITS.TRAVEL_DATE_MAX),
+    itemIds: cleanItems,
+    packedIds: [],
+    notes: clampString(input.notes, LIMITS.NOTES_MAX),
+    createdAt: now,
+    updatedAt: now,
+  };
 
-  return tripRef.id;
+  return {
+    tripId,
+    nextState: {
+      ...state,
+      trips: sortByCreatedDesc([newTrip, ...state.trips]),
+    },
+  };
 }
 
-export async function addGarmentToTrip(
-  userId: string,
+export function addGarmentToTrip(
+  state: LocalWardrobeState,
   trip: Trip,
   garmentId: string
-): Promise<void> {
-  if (trip.status === 'completado') return;
-  if (trip.itemIds.includes(garmentId)) return;
+): LocalWardrobeState {
+  if (trip.status === 'completado') return state;
+  if (trip.itemIds.includes(garmentId)) return state;
   if (trip.itemIds.length >= LIMITS.TRIP_ITEMS_MAX) {
     throw new Error(`Máximo ${LIMITS.TRIP_ITEMS_MAX} prendas por maleta.`);
   }
-  const path = `users/${userId}/trips/${trip.id}`;
 
-  await runOfflineSafeWrite(
-    () =>
-      updateDoc(doc(db, 'users', userId, 'trips', trip.id), {
-        itemIds: [...trip.itemIds, garmentId],
-        updatedAt: serverTimestamp(),
-      }),
-    OperationType.UPDATE,
-    path
+  const now = Date.now();
+  const nextTrips = state.trips.map((t) =>
+    t.id === trip.id
+      ? {
+          ...t,
+          itemIds: [...t.itemIds, garmentId],
+          updatedAt: now,
+        }
+      : t
   );
+
+  return {
+    ...state,
+    trips: nextTrips,
+  };
 }
 
-export async function removeGarmentFromTrip(
-  userId: string,
+export function removeGarmentFromTrip(
+  state: LocalWardrobeState,
   trip: Trip,
   garment: Garment
-): Promise<void> {
-  if (trip.status === 'completado') return;
-  const path = `users/${userId}/trips/${trip.id}`;
-  const batch = writeBatch(db);
-  const nextItems = trip.itemIds.filter((id) => id !== garment.id);
-  const nextPacked = trip.packedIds.filter((id) => id !== garment.id);
-  batch.update(doc(db, 'users', userId, 'trips', trip.id), {
-    itemIds: nextItems,
-    packedIds: nextPacked,
-    status: nextPacked.length > 0 ? 'en_camino' : 'planeando',
-    updatedAt: serverTimestamp(),
+): LocalWardrobeState {
+  if (trip.status === 'completado') return state;
+  const now = Date.now();
+
+  const nextTrips = state.trips.map((t) => {
+    if (t.id !== trip.id) return t;
+    const nextItems = t.itemIds.filter((id) => id !== garment.id);
+    const nextPacked = t.packedIds.filter((id) => id !== garment.id);
+    return {
+      ...t,
+      itemIds: nextItems,
+      packedIds: nextPacked,
+      status: nextPacked.length > 0 ? ('en_camino' as const) : ('planeando' as const),
+      updatedAt: now,
+    };
   });
 
-  if (garment.location === 'maleta' && garment.tripId === trip.id) {
-    batch.update(doc(db, 'users', userId, 'garments', garment.id), {
-      location: trip.origin,
-      targetLocation: 'ninguno',
-      tripId: '',
-      updatedAt: serverTimestamp(),
-    });
-  }
+  const shouldRestoreGarment =
+    garment.location === 'maleta' && garment.tripId === trip.id;
 
-  await runOfflineSafeWrite(() => batch.commit(), OperationType.WRITE, path);
+  const nextGarments = shouldRestoreGarment
+    ? sortByUpdatedDesc(
+        state.garments.map((g) =>
+          g.id === garment.id
+            ? {
+                ...g,
+                location: trip.origin,
+                targetLocation: 'ninguno' as TargetLocation,
+                tripId: '',
+                updatedAt: now,
+              }
+            : g
+        )
+      )
+    : state.garments;
+
+  return {
+    ...state,
+    trips: nextTrips,
+    garments: nextGarments,
+  };
 }
 
-export async function toggleTripPackedItem(
-  userId: string,
+export function toggleTripPackedItem(
+  state: LocalWardrobeState,
   trip: Trip,
   garment: Garment
-): Promise<void> {
-  if (trip.status === 'completado') return;
-  const path = `users/${userId}/trips/${trip.id}`;
+): LocalWardrobeState {
+  if (trip.status === 'completado') return state;
+  const now = Date.now();
   const isCurrentlyPacked = trip.packedIds.includes(garment.id);
 
-  const batch = writeBatch(db);
-  const nextPacked = isCurrentlyPacked
-    ? trip.packedIds.filter((id) => id !== garment.id)
-    : [...trip.packedIds, garment.id].slice(0, LIMITS.TRIP_ITEMS_MAX);
+  const nextTrips = state.trips.map((t) => {
+    if (t.id !== trip.id) return t;
+    const nextPacked = isCurrentlyPacked
+      ? t.packedIds.filter((id) => id !== garment.id)
+      : [...t.packedIds, garment.id].slice(0, LIMITS.TRIP_ITEMS_MAX);
 
-  const nextItems = trip.itemIds.includes(garment.id)
-    ? trip.itemIds
-    : [...trip.itemIds, garment.id].slice(0, LIMITS.TRIP_ITEMS_MAX);
+    const nextItems = t.itemIds.includes(garment.id)
+      ? t.itemIds
+      : [...t.itemIds, garment.id].slice(0, LIMITS.TRIP_ITEMS_MAX);
 
-  batch.update(doc(db, 'users', userId, 'trips', trip.id), {
-    itemIds: nextItems,
-    packedIds: nextPacked,
-    status: nextPacked.length > 0 ? 'en_camino' : 'planeando',
-    updatedAt: serverTimestamp(),
+    return {
+      ...t,
+      itemIds: nextItems,
+      packedIds: nextPacked,
+      status: nextPacked.length > 0 ? ('en_camino' as const) : ('planeando' as const),
+      updatedAt: now,
+    };
   });
 
-  if (!isCurrentlyPacked) {
-    batch.update(doc(db, 'users', userId, 'garments', garment.id), {
-      location: 'maleta',
-      targetLocation: trip.destination,
-      tripId: trip.id,
-      updatedAt: serverTimestamp(),
-    });
-  } else {
-    batch.update(doc(db, 'users', userId, 'garments', garment.id), {
-      location: trip.origin,
-      targetLocation: 'ninguno',
-      tripId: '',
-      updatedAt: serverTimestamp(),
-    });
-  }
+  const nextGarments = sortByUpdatedDesc(
+    state.garments.map((g) => {
+      if (g.id !== garment.id) return g;
+      if (!isCurrentlyPacked) {
+        return {
+          ...g,
+          location: 'maleta' as GarmentLocation,
+          targetLocation: trip.destination,
+          tripId: trip.id,
+          updatedAt: now,
+        };
+      }
+      return {
+        ...g,
+        location: trip.origin,
+        targetLocation: 'ninguno' as TargetLocation,
+        tripId: '',
+        updatedAt: now,
+      };
+    })
+  );
 
-  await runOfflineSafeWrite(() => batch.commit(), OperationType.WRITE, path);
+  return {
+    ...state,
+    trips: nextTrips,
+    garments: nextGarments,
+  };
 }
 
-export async function completeTripAndUnpack(
-  userId: string,
-  trip: Trip,
-  garmentsById: Map<string, Garment>
-): Promise<number> {
-  if (trip.status === 'completado') return 0;
-  const path = `users/${userId}/trips/${trip.id}`;
+export function completeTripAndUnpack(
+  state: LocalWardrobeState,
+  trip: Trip
+): { nextState: LocalWardrobeState; movedCount: number } {
+  if (trip.status === 'completado') {
+    return { nextState: state, movedCount: 0 };
+  }
+
+  const now = Date.now();
   const idsToMove = trip.packedIds.length > 0 ? trip.packedIds : trip.itemIds;
+  const moveSet = new Set(idsToMove);
+  const ownerId = state.profile.uid || 'local-user';
 
-  const batch = writeBatch(db);
-  batch.update(doc(db, 'users', userId, 'trips', trip.id), {
-    status: 'completado',
-    packedIds: idsToMove,
-    updatedAt: serverTimestamp(),
-  });
+  const nextTrips = state.trips.map((t) =>
+    t.id === trip.id
+      ? {
+          ...t,
+          status: 'completado' as const,
+          packedIds: idsToMove,
+          updatedAt: now,
+        }
+      : t
+  );
 
+  const newMovements: Movement[] = [];
   let movedCount = 0;
-  for (const id of idsToMove) {
-    const garment = garmentsById.get(id);
-    if (!garment) continue;
 
-    const garmentRef = doc(db, 'users', userId, 'garments', id);
-    batch.update(garmentRef, {
-      location: trip.destination,
-      targetLocation: 'ninguno',
-      tripId: '',
-      updatedAt: serverTimestamp(),
-    });
-
-    const movementRef = doc(collection(db, 'users', userId, 'movements'));
-    batch.set(movementRef, {
-      ownerId: userId,
-      garmentId: id,
-      garmentName: clampString(garment.name, LIMITS.NAME_MAX),
+  const nextGarments = state.garments.map((g) => {
+    if (!moveSet.has(g.id)) return g;
+    movedCount += 1;
+    newMovements.push({
+      id: createLocalId(`mov_${movedCount}`),
+      ownerId,
+      garmentId: g.id,
+      garmentName: clampString(g.name, LIMITS.NAME_MAX),
       fromLocation: trip.origin,
       toLocation: trip.destination,
       tripTitle: clampString(trip.title, LIMITS.TRIP_TITLE_MAX),
-      createdAt: serverTimestamp(),
+      createdAt: now + movedCount,
     });
-    movedCount += 1;
-  }
+    return {
+      ...g,
+      location: trip.destination,
+      targetLocation: 'ninguno' as TargetLocation,
+      tripId: '',
+      updatedAt: now,
+    };
+  });
 
-  await runOfflineSafeWrite(() => batch.commit(), OperationType.WRITE, path);
-  return movedCount;
+  return {
+    movedCount,
+    nextState: {
+      ...state,
+      trips: nextTrips,
+      garments: sortByUpdatedDesc(nextGarments),
+      movements: sortByCreatedDesc([...newMovements, ...state.movements]),
+    },
+  };
 }
 
-export async function deleteTrip(
-  userId: string,
-  trip: Trip,
-  garments: Garment[]
-): Promise<void> {
-  const path = `users/${userId}/trips/${trip.id}`;
-  const batch = writeBatch(db);
-  batch.delete(doc(db, 'users', userId, 'trips', trip.id));
-
-  for (const g of garments) {
-    if (g.location === 'maleta' && g.tripId === trip.id) {
-      batch.update(doc(db, 'users', userId, 'garments', g.id), {
-        location: trip.origin,
-        targetLocation: 'ninguno',
-        tripId: '',
-        updatedAt: serverTimestamp(),
-      });
-    }
-  }
-
-  await runOfflineSafeWrite(() => batch.commit(), OperationType.WRITE, path);
-}
-
-export async function deleteMovement(
-  userId: string,
-  movementId: string
-): Promise<void> {
-  const path = `users/${userId}/movements/${movementId}`;
-  await runOfflineSafeWrite(
-    () => deleteDoc(doc(db, 'users', userId, 'movements', movementId)),
-    OperationType.DELETE,
-    path
+export function deleteTrip(
+  state: LocalWardrobeState,
+  trip: Trip
+): LocalWardrobeState {
+  const now = Date.now();
+  const nextTrips = state.trips.filter((t) => t.id !== trip.id);
+  const nextGarments = sortByUpdatedDesc(
+    state.garments.map((g) => {
+      if (g.location === 'maleta' && g.tripId === trip.id) {
+        return {
+          ...g,
+          location: trip.origin,
+          targetLocation: 'ninguno' as TargetLocation,
+          tripId: '',
+          updatedAt: now,
+        };
+      }
+      return g;
+    })
   );
+
+  return {
+    ...state,
+    trips: nextTrips,
+    garments: nextGarments,
+  };
 }
 
-export async function saveSeasonReport(
-  userId: string,
+export function deleteMovement(
+  state: LocalWardrobeState,
+  movementId: string
+): LocalWardrobeState {
+  return {
+    ...state,
+    movements: state.movements.filter((m) => m.id !== movementId),
+  };
+}
+
+export function saveSeasonReport(
+  state: LocalWardrobeState,
   input: {
     title: string;
     monthKey: string;
@@ -569,7 +565,7 @@ export async function saveSeasonReport(
     movedSummaryLines: string[];
     notes: string;
   }
-): Promise<string> {
+): { nextState: LocalWardrobeState; seasonId: string } {
   const title = clampString(input.title, LIMITS.SEASON_TITLE_MAX);
   if (!title) {
     throw new Error('El título de la temporada es obligatorio.');
@@ -590,49 +586,41 @@ export async function saveSeasonReport(
     .filter((s) => s.length > 0)
     .slice(0, LIMITS.SUMMARY_LINES_MAX);
 
-  const seasonRef = doc(collection(db, 'users', userId, 'seasons'));
-  const path = `users/${userId}/seasons/${seasonRef.id}`;
+  const seasonId = createLocalId('season');
+  const season: SeasonReport = {
+    id: seasonId,
+    ownerId: state.profile.uid || 'local-user',
+    title,
+    monthKey: input.monthKey,
+    monthLabel,
+    toCityCount: clampNonNegativeInt(input.toCityCount, 10000),
+    toRanchCount: clampNonNegativeInt(input.toRanchCount, 10000),
+    totalMovements: clampNonNegativeInt(input.totalMovements, 10000),
+    completedTripsCount: clampNonNegativeInt(input.completedTripsCount, 1000),
+    citySnapshotCount: clampNonNegativeInt(input.citySnapshotCount, 10000),
+    ranchSnapshotCount: clampNonNegativeInt(input.ranchSnapshotCount, 10000),
+    bagSnapshotCount: clampNonNegativeInt(input.bagSnapshotCount, 10000),
+    topMovedNames,
+    movedSummaryLines,
+    notes: clampString(input.notes, LIMITS.NOTES_MAX),
+    createdAt: Date.now(),
+  };
 
-  await runOfflineSafeWrite(
-    () =>
-      setDoc(seasonRef, {
-        ownerId: userId,
-        title,
-        monthKey: input.monthKey,
-        monthLabel,
-        toCityCount: clampNonNegativeInt(input.toCityCount, 10000),
-        toRanchCount: clampNonNegativeInt(input.toRanchCount, 10000),
-        totalMovements: clampNonNegativeInt(input.totalMovements, 10000),
-        completedTripsCount: clampNonNegativeInt(
-          input.completedTripsCount,
-          1000
-        ),
-        citySnapshotCount: clampNonNegativeInt(input.citySnapshotCount, 10000),
-        ranchSnapshotCount: clampNonNegativeInt(
-          input.ranchSnapshotCount,
-          10000
-        ),
-        bagSnapshotCount: clampNonNegativeInt(input.bagSnapshotCount, 10000),
-        topMovedNames,
-        movedSummaryLines,
-        notes: clampString(input.notes, LIMITS.NOTES_MAX),
-        createdAt: serverTimestamp(),
-      }),
-    OperationType.CREATE,
-    path
-  );
-
-  return seasonRef.id;
+  return {
+    seasonId,
+    nextState: {
+      ...state,
+      seasons: sortByCreatedDesc([season, ...state.seasons]),
+    },
+  };
 }
 
-export async function deleteSeasonReport(
-  userId: string,
+export function deleteSeasonReport(
+  state: LocalWardrobeState,
   seasonId: string
-): Promise<void> {
-  const path = `users/${userId}/seasons/${seasonId}`;
-  await runOfflineSafeWrite(
-    () => deleteDoc(doc(db, 'users', userId, 'seasons', seasonId)),
-    OperationType.DELETE,
-    path
-  );
+): LocalWardrobeState {
+  return {
+    ...state,
+    seasons: state.seasons.filter((s) => s.id !== seasonId),
+  };
 }

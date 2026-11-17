@@ -33,15 +33,9 @@ export class ErrorBoundary extends React.Component<
 
   render() {
     if (this.state.hasError) {
-      let friendlyMessage =
-        'Tuvimos un problema al sincronizar tus datos. Por favor recarga la aplicación.';
-      if (this.state.message.includes('Quota exceeded')) {
-        friendlyMessage =
-          'Se alcanzó el límite diario de lecturas gratuitas de Firestore. Se restablecerá mañana.';
-      } else if (this.state.message.includes('Missing or insufficient permissions')) {
-        friendlyMessage =
-          'Tu sesión no tiene permisos para realizar esta operación o expiró. Inicia sesión de nuevo.';
-      }
+      const friendlyMessage =
+        this.state.message ||
+        'Tuvimos un problema inesperado al cargar tus datos locales. Por favor recarga la aplicación.';
 
       return (
         <div className="min-h-screen flex items-center justify-center p-6">
